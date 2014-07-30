@@ -1,0 +1,189 @@
+#! /usr/bin/python
+# doc string
+#import pickle
+import curses
+import os
+import json
+import time
+from IPython.kernel import KernelManager
+from IPython.lib.kernel import find_connection_file
+import sys
+from Queue import Empty
+from datetime import datetime, timedelta
+
+DEBUG = False
+
+# taken from http://nbviewer.ipython.org/gist/minrk/5672711
+def collect_outputs(client, timeout=0.1):
+    """flush the IOPub channel for outputs, and construct a dict of output data for each msg_id"""
+    all_outputs = {}
+    while True:
+        try:
+            msg = client.get_iopub_msg(timeout=timeout)
+        except Empty:
+            break
+        parent_id = msg['parent_header'].get('msg_id', None)
+        # no parent, ignore
+        if not parent_id:
+            continue
+        if parent_id not in all_outputs:
+            all_outputs[parent_id] = dict(stdout='', stderr='', display_data=[], pyout=[])
+        outputs = all_outputs[parent_id]
+
+        header = msg['header']
+        msg_type = header['msg_type']
+        content = msg['content']
+        if msg_type == 'stream':
+            outputs[content['name']] += content['data']
+        elif msg_type in ('display_data', 'pyout'):
+            outputs[msg_type].append(content)
+    return all_outputs
+######
+class PyWatch():
+    def __init__(self, stdscr):
+        for i in range(7):
+            curses.init_pair(i+1, 7, i+1)
+        self.stdscr = stdscr
+        stdscr.keypad(1)
+        input_windows_height = 2
+        self.input_window = InputWindow(self, curses.newwin(input_windows_height, stdscr.getmaxyx()[1], stdscr.getmaxyx()[0]-input_windows_height, 0), input_windows_height)
+        self.watch = WatchPanel(self.input_window.msg, curses.newwin(stdscr.getmaxyx()[0]-input_windows_height, stdscr.getmaxyx()[1], 0,0), sys.argv[1] if len(sys.argv)>1 else '')
+        self.input_window.msg('initiated')
+    def main_loop(self):
+        self.watch.main_loop()
+
+
+class WatchPanel(object):
+    def __init__(self, msg_sender, window, connection_file):
+        self.msg = msg_sender
+        self.window = window
+        self.filename = None
+        self.window.timeout(1)
+        self.km = None
+        self.cl = None
+        self.kernel_dir = None
+        self.connection_file = connection_file
+        self.alive = False
+        import time
+        time.sleep(2)
+        self.setup_kernel_manager(connection_file)
+
+    def setup_kernel_manager(self, connection_file=None):
+        if not connection_file:
+            if self.kernel_dir:
+                files = [os.path.join(self.kernel_dir,x) for x in os.listdir(self.kernel_dir)]
+                stats = {}
+                for f in files:
+                    stats[f] = os.stat(f)
+                max_mtime = max([x.st_mtime for x in stats.values()])
+                options = [x for x,y in stats.items() if y.st_mtime==max_mtime]
+                if len(options)==1:
+                    connection_file = options[0]
+            else:
+                connection_file = '*'
+        connection_file = find_connection_file(connection_file)
+        self.msg('connection_file is '+connection_file)
+        if connection_file:
+            self.kernel_dir = os.path.dirname(connection_file)
+        self.km = KernelManager(connection_file=connection_file)
+        self.km.load_connection_file()
+        self.cl = self.km.client()
+        self.cl.start_channels()
+        self.alive = True
+
+    def main_loop(self):
+        pending_request = None
+        watches = {}
+        last_output = None
+        while True:
+            c = self.window.getch()
+            if c==-1:
+                time.sleep(1)
+            elif c== ord('r'):
+                self.setup_kernel_manager()
+            if self.alive and last_output and last_output < datetime.now()-timedelta(seconds=10):
+                self.alive = False
+                self.msg('client is dead...')
+            if not self.alive:
+                continue
+            if pending_request is None:
+                pending_request = self.cl.execute('print json.dumps(_watches)', silent=True, store_history=False)
+            outputs = collect_outputs(self.cl, timeout=0.1)
+            if outputs:
+                last_output = datetime.now()
+            if DEBUG:
+                self.msg(str(outputs))
+            for msg_id, output in outputs.items():
+                if msg_id==pending_request:
+                    try:
+                        watches_raw = output['stdout']
+                        try:
+                            watches = json.loads(watches_raw)
+                        except ValueError:
+                            watches = {}
+                            self.msg('no json - ' + watches_raw)
+                    except IndexError:
+                        watches = {'does not exists':''}
+                pending_request = None
+            self.paint_watches(watches)
+            self.window.refresh()
+    def paint_watches(self, watches):
+        self.window.clear()
+        self.window.move(0,0)
+        last_x = 0
+        last_y = 0
+        self.window.move(0,0)
+        for watch in watches:
+            try:
+                if 'x' in watch:
+                    last_x = watch['x']
+                    last_y = watch['y']
+                    self.window.move(watch['y'], watch['x'])
+                elif 'new_line' in watch:
+                    last_y += 1
+                    self.window.move(last_y, last_x)
+                elif 'text' in watch:
+                    self.window.addstr(" "+watch['text']+" ", curses.color_pair(watch.get('color',1)))
+                else:
+                    raise Exception()
+            except Exception, e:
+                self.msg('problem with watch %s: %s'%(watch.get('name', str(watch)), e))
+                continue
+
+class InputWindow(object):
+    def __init__(self, app, window, height):
+        self.app = app
+        self.window = window
+        self.status = []
+        self.height = height
+        self.refresh()
+    def create_border(self):
+        self.window.refresh()
+        self.window.move(0,0)
+        self.window.addstr("-"*self.window.getmaxyx()[1])
+    def refresh(self):
+        self.window.clear()
+        self.create_border()
+        to_display = self.status[-self.height+1:]
+        for i, s in enumerate(to_display):
+            self.window.move(i+1,0)
+            try:
+                self.window.addstr(s[:self.window.getmaxyx()[1]-1])
+            except:
+                raise Exception('cannot display:', s)
+        self.window.refresh()
+    def msg(self, new_status):
+        self.status.append(str(new_status).replace('\n',' '))
+        if len(self.status)>100:
+            self.status = self.status[-10:]
+        self.refresh()
+
+def init_pywatch(stdscr):
+    "pass to curses.wrapper"
+    app = PyWatch(stdscr)
+    try:
+        app.main_loop()
+    except KeyboardInterrupt:
+        sys.exit(0)
+if __name__ == "__main__":
+    curses.wrapper(func=init_pywatch)
