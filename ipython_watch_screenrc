@@ -1,6 +1,6 @@
 split
 caption string "%{= dd} "
-screen -t watch 2 "python $DIR/IPWatch"
+screen -t watch 2 "$DIR/IPWatch"
 focus down
 caption string "%{= dd} "
 screen 1 "$DIR/ipython_and_kill.sh"

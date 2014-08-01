@@ -5,13 +5,13 @@ import curses
 import os
 import json
 import time
+import logging
 from IPython.kernel import KernelManager
 from IPython.lib.kernel import find_connection_file
 import sys
 from Queue import Empty
-from datetime import datetime, timedelta
-
-DEBUG = False
+from datetime import datetime
+import optparse
 
 # taken from http://nbviewer.ipython.org/gist/minrk/5672711
 def collect_outputs(client, timeout=0.1):
@@ -40,32 +40,39 @@ def collect_outputs(client, timeout=0.1):
     return all_outputs
 ######
 class PyWatch():
-    def __init__(self, stdscr):
+    def __init__(self, stdscr, options):
         for i in range(7):
             curses.init_pair(i+1, 7, i+1)
         self.stdscr = stdscr
         stdscr.keypad(1)
-        input_windows_height = 2
+        self.status = {'connection_file':'NULL', 'last_answer':-999}
+        input_windows_height = options.input_lines + 1
         self.input_window = InputWindow(self, curses.newwin(input_windows_height, stdscr.getmaxyx()[1], stdscr.getmaxyx()[0]-input_windows_height, 0), input_windows_height)
-        self.watch = WatchPanel(self.input_window.msg, curses.newwin(stdscr.getmaxyx()[0]-input_windows_height, stdscr.getmaxyx()[1], 0,0), sys.argv[1] if len(sys.argv)>1 else '')
-        self.input_window.msg('initiated')
+        self.watch = WatchPanel(self.msg, self.set_status, curses.newwin(stdscr.getmaxyx()[0]-input_windows_height, stdscr.getmaxyx()[1], 0,0), options.connection_file)
+
     def main_loop(self):
         self.watch.main_loop()
 
+    def msg(self, message):
+        logging.info(message)
+        self.input_window.msg(message)
+
+    def set_status(self, key, value):
+        self.status[key] = value
+        self.input_window.status(self.status['connection_file'], self.status.get('error',''), str(self.status['last_answer']))
+
 
 class WatchPanel(object):
-    def __init__(self, msg_sender, window, connection_file):
+    def __init__(self, msg_sender, status_setter, window, connection_file):
         self.msg = msg_sender
         self.window = window
         self.filename = None
         self.window.timeout(1)
+        self.status_setter = status_setter
         self.km = None
         self.cl = None
         self.kernel_dir = None
         self.connection_file = connection_file
-        self.alive = False
-        import time
-        time.sleep(2)
         self.setup_kernel_manager(connection_file)
 
     def setup_kernel_manager(self, connection_file=None):
@@ -82,49 +89,54 @@ class WatchPanel(object):
             else:
                 connection_file = '*'
         connection_file = find_connection_file(connection_file)
-        self.msg('connection_file is '+connection_file)
+        self.status_setter('connection_file', connection_file)
+        self.msg('connection established to connection_file %s'%connection_file)
         if connection_file:
             self.kernel_dir = os.path.dirname(connection_file)
         self.km = KernelManager(connection_file=connection_file)
         self.km.load_connection_file()
         self.cl = self.km.client()
         self.cl.start_channels()
-        self.alive = True
 
     def main_loop(self):
         pending_request = None
         watches = {}
-        last_output = None
+        last_output = datetime.now()
         while True:
+            self.status_setter('last_answer', str(datetime.now()-last_output))
             c = self.window.getch()
             if c==-1:
                 time.sleep(1)
             elif c== ord('r'):
+                self.msg('reconnecting...')
                 self.setup_kernel_manager()
-            if self.alive and last_output and last_output < datetime.now()-timedelta(seconds=10):
-                self.alive = False
-                self.msg('client is dead...')
-            if not self.alive:
-                continue
+            elif c == ord('d'):
+                import pudb; pudb.set_trace()
             if pending_request is None:
                 pending_request = self.cl.execute('print json.dumps(_watches)', silent=True, store_history=False)
             outputs = collect_outputs(self.cl, timeout=0.1)
             if outputs:
                 last_output = datetime.now()
-            if DEBUG:
-                self.msg(str(outputs))
+            fine = False
             for msg_id, output in outputs.items():
                 if msg_id==pending_request:
                     try:
                         watches_raw = output['stdout']
                         try:
                             watches = json.loads(watches_raw)
+                            if not isinstance(watches, list):
+                                watches = {}
+                                self.status_setter('error','watches must be a list')
+                            else:
+                                fine = True
                         except ValueError:
                             watches = {}
-                            self.msg('no json - ' + watches_raw)
+                            self.status_setter('error','no json')
                     except IndexError:
                         watches = {'does not exists':''}
                 pending_request = None
+            if fine:
+                self.status_setter('error','')
             self.paint_watches(watches)
             self.window.refresh()
     def paint_watches(self, watches):
@@ -154,36 +166,77 @@ class InputWindow(object):
     def __init__(self, app, window, height):
         self.app = app
         self.window = window
-        self.status = []
+        self.msgs= []
         self.height = height
+        self.status_line_elements = ['1', '2', '3']
         self.refresh()
+    def status(self, *args):
+        self.status_line_elements = args
+        self.refresh()
+
     def create_border(self):
         self.window.refresh()
         self.window.move(0,0)
         self.window.addstr("-"*self.window.getmaxyx()[1])
+
+    def add_status_line(self, y):
+        if not self.status_line_elements:
+            return
+        n_elements = len(self.status_line_elements)
+        maxx = self.window.getmaxyx()[1]-1
+        interval = maxx / ( n_elements - 1 )
+        first_elem = self.status_line_elements[0]
+        self.window.move(1,0)
+        self.window.addstr(first_elem[:maxx] + ' ')
+        for i, elem in enumerate(self.status_line_elements[1:-1]):
+            if not elem:
+                continue
+            logging.debug('i %s elem %s y %s interval %s'%(i, elem, y, interval))
+            self.window.move(y, ((i+1)*interval - len(elem)/2) - 1 )
+            self.window.addstr(' ' + elem + ' ')
+        last_elem = self.status_line_elements[-1]
+        self.window.move(y, maxx - len(last_elem))
+        self.window.addstr(' ' + last_elem)
     def refresh(self):
         self.window.clear()
         self.create_border()
-        to_display = self.status[-self.height+1:]
-        for i, s in enumerate(to_display):
-            self.window.move(i+1,0)
+        self.add_status_line(1)
+        msgs_to_display = self.msgs[-self.height+2:]
+        for i, s in enumerate(msgs_to_display):
+            self.window.move(i+2,0)
             try:
                 self.window.addstr(s[:self.window.getmaxyx()[1]-1])
             except:
                 raise Exception('cannot display:', s)
         self.window.refresh()
     def msg(self, new_status):
-        self.status.append(str(new_status).replace('\n',' '))
-        if len(self.status)>100:
-            self.status = self.status[-10:]
+        self.msgs.append(str(new_status).replace('\n',' '))
+        if len(self.msgs)>100:
+            self.msgs= self.msgs[-10:]
         self.refresh()
 
-def init_pywatch(stdscr):
+def init_pywatch(stdscr, options):
     "pass to curses.wrapper"
-    app = PyWatch(stdscr)
+    app = PyWatch(stdscr, options)
     try:
         app.main_loop()
     except KeyboardInterrupt:
         sys.exit(0)
+
+def parse_args():
+    parser = optparse.OptionParser(usage='usage: %prog [options]')
+    parser.add_option('', '--connection-file', type='str', default='')
+    parser.add_option('', '--input-lines', type='int', default='3')
+    parser.add_option('', '--log-file', type='str', default='')
+    parser.add_option('-v', '--verbose', action='store_true')
+    return parser.parse_args()
+
 if __name__ == "__main__":
-    curses.wrapper(func=init_pywatch)
+    options, args = parse_args()
+    if options.log_file:
+        logging.basicConfig(stream=open(options.log_file,'a'),
+                format='%(asctime)s | %(levelname)-5s | IPWatch | %(message)s',
+                datefmt='%Y/%m/%d %H:%M:%S',
+                level=logging.DEBUG if options.verbose else logging.INFO)
+    logging.info('Started')
+    curses.wrapper(init_pywatch, options=options)
