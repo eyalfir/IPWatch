@@ -13,7 +13,7 @@ class WatchText(WidgetWrap):
 class Watch(WidgetWrap):
     def __init__(self, name, factory):
         self.watch_name = name
-        default = Columns([Filler(Text('%s '%self.watch_name, wrap='clip', align='right')), Filler(WatchText(factory, wrap='clip'))])
+        default = Columns([Filler(Text('%s'%self.watch_name, wrap='clip', align='right')), (3, Filler(Text(' = '))), Filler(WatchText(factory, wrap='clip'))])
         WidgetWrap.__init__(self, default)
 
 class WatchList(WidgetWrap):
@@ -34,7 +34,7 @@ class WatchList(WidgetWrap):
             raise KeyError('%s does not exist', key)
 
     def add_key(self, key):
-        self.pile.contents.append((Watch(key, lambda:self.globals_factory().get(key, '%s does not exist'%key)), ('weight', 1)))
+        self.pile.contents.append((Watch(key, lambda:self.globals_factory().get(key, '%s does not exist'%key)), ('given',1)))
 
     def remove_all_keys(self):
         for key in self.get_watched_keys():
