@@ -1,6 +1,8 @@
 #! /usr/bin/python
 # doc string
 #import pickle
+from threading import Thread
+import urwid
 import curses
 import os
 import pickle
@@ -8,11 +10,22 @@ import time
 import logging
 from IPython.kernel import KernelManager
 from IPython.lib.kernel import find_connection_file
-import sys
 from Queue import Empty
 from datetime import datetime
 import optparse
 
+palette = [
+    ('body','black','light gray', 'standout'),
+    ('reverse','light gray','black'),
+    ('header','white','dark red', 'bold'),
+    ('important','dark blue','light gray',('standout','underline')),
+    ('editfc','white', 'dark blue', 'bold'),
+    ('editbx','light gray', 'dark blue'),
+    ('editcp','black','light gray', 'standout'),
+    ('bright','dark gray','light gray', ('bold','standout')),
+    ('buttn','black','dark cyan'),
+    ('buttnf','white','dark blue','bold'),
+    ]
 # taken from http://nbviewer.ipython.org/gist/minrk/5672711
 def collect_outputs(client, timeout=0.1):
     """flush the IOPub channel for outputs, and construct a dict of output data for each msg_id"""
@@ -48,7 +61,7 @@ class PyWatch():
         self.status = {'connection_file':'NULL', 'last_answer':-999}
         input_windows_height = options.input_lines + 1
         self.input_window = InputWindow(self, curses.newwin(input_windows_height, stdscr.getmaxyx()[1], stdscr.getmaxyx()[0]-input_windows_height, 0), input_windows_height)
-        self.watch = WatchPanel(self.msg, self.set_status, curses.newwin(stdscr.getmaxyx()[0]-input_windows_height, stdscr.getmaxyx()[1], 0,0), options.connection_file)
+        #self.watch = WatchPanel(self.msg, self.set_status, curses.newwin(stdscr.getmaxyx()[0]-input_windows_height, stdscr.getmaxyx()[1], 0,0), options.connection_file)
 
     def main_loop(self):
         self.watch.main_loop()
@@ -65,19 +78,36 @@ class PyWatch():
             logging.debug('status of %s set to %s', key, value)
         self.input_window.status(self.status['connection_file'], self.status.get('error',''), str(self.status['last_answer']))
 
+class WatchWidget(urwid.Widget):
 
-class WatchPanel(object):
-    def __init__(self, msg_sender, status_setter, window, connection_file):
-        self.msg = msg_sender
-        self.window = window
-        self.filename = None
-        self.window.timeout(1)
+    _sizing = frozenset(['box'])
+
+    def __init__(self, status_setter=None, connection_file='', async=True, timeout=0.5):
+        self.status = {}
         self.status_setter = status_setter
+        self.timeout = timeout
         self.km = None
         self.cl = None
         self.kernel_dir = None
         self.connection_file = connection_file
         self.setup_kernel_manager(connection_file)
+        # box_size and valid_size both hold size tuple. box_size is the last size the parent asked in the render, and valid_size is the size which 'self.content' was rendered with. Only if they match the widget will paint itself.
+        self.box_size = None
+        self.valid_size = None
+        self.async = async
+        if self.async:
+            self.update_thread = Thread(target=self.update_loop)
+            self.update_thread.setDaemon(True)
+        self.content = []
+
+    def set_status(self, key, value, unlogged_keys={'last_answer'}):
+        if key in self.status and value==self.status[key]:
+            return
+        self.status[key] = value
+        if key not in unlogged_keys:
+            logging.debug('status of %s set to %s', key, value)
+        if self.status_setter:
+            self.status_setter(key, value)
 
     def setup_kernel_manager(self, connection_file=None):
         if not connection_file:
@@ -93,8 +123,8 @@ class WatchPanel(object):
             else:
                 connection_file = '*'
         connection_file = find_connection_file(connection_file)
-        self.status_setter('connection_file', connection_file)
-        self.msg('connection established to connection_file %s'%connection_file)
+        self.set_status('connection_file', connection_file)
+        logging.info('connection established to connection_file %s'%connection_file)
         if connection_file:
             self.kernel_dir = os.path.dirname(connection_file)
         self.km = KernelManager(connection_file=connection_file)
@@ -108,85 +138,72 @@ class WatchPanel(object):
         self.exe('import IPWatch.watch_lib as wlib')
 
     def exe(self, s):
-        self.lc.execute(s, silent=True, store_history=False)
+        return self.cl.execute(s, silent=True, store_history=False)
+        #return self.cl.execute(s, silent=False, store_history=True)
 
-    def main_loop(self):
-        pending_request = None
-        last_output = datetime.now()
+    def refresh(self, timeout=0.5):
         content = []
-        while True:
-            self.status_setter('last_answer', str(datetime.now()-last_output))
-            c = self.window.getch()
-            if c==-1:
-                time.sleep(2)
-            elif c== ord('r'):
-                self.msg('reconnecting...')
-                self.setup_kernel_manager()
-            elif c == ord('d'):
-                import pudb; pudb.set_trace()
-            if pending_request is None:
-                pending_request = self.exe('print pickle.dumps(list(___top_widget.render((%d,%d)).content()))'%(self.window.getmaxyx()[1], self.window.getmaxyx()[0]-1))
-            outputs = collect_outputs(self.cl, timeout=0.1)
-            if outputs:
-                last_output = datetime.now()
-            fine = False
-            for msg_id, output in outputs.items():
-                if msg_id==pending_request:
+        asked_size = self.box_size
+        pending_request = self.exe('print pickle.dumps(list(___top_widget.render((%d,%d)).content()))'%(asked_size))
+        outputs = collect_outputs(self.cl, timeout=timeout)
+        got_outputs = bool(outputs)
+        fine = False
+        for msg_id, output in outputs.items():
+            if msg_id==pending_request:
+                try:
+                    content_raw = output['stdout']
                     try:
-                        content_raw = output['stdout']
-                        try:
-                            content = pickle.loads(content_raw)
-                            if not isinstance(content, list):
-                                content = []
-                                self.status_setter('error','instructions must be a list')
-                            else:
-                                fine = True
-                        except Exception:
+                        content = pickle.loads(content_raw)
+                        if not isinstance(content, list):
                             content = []
-                            self.status_setter('error','no pickle')
-                    except IndexError:
-                        raise
+                            self.set_status('error','instructions must be a list')
+                        else:
+                            fine = True
+                    except Exception:
+                        content = []
+                        self.set_status('error','no pickle')
+                except IndexError:
+                    raise
 
-                pending_request = None
-            if fine:
-                self.status_setter('error','')
+            pending_request = None
+        if fine:
+            self.set_status('error','')
+            logging.debug('all is fine')
+        if content!=self.content:
+            self._invalidate()
+        self.content = content
+        self.valid_size = asked_size
+        return got_outputs
+
+    def update_loop(self):
+        last_output = datetime.now()
+        logging.debug('update loop started')
+        while True:
+            got_outputs = self.refresh(timeout=self.timeout)
+            if got_outputs:
+                last_output = datetime.now()
+            self.set_status('last_answer', str(datetime.now()-last_output))
+            time.sleep(1)
+
+    def render(self, size, focus=False):
+        self.box_size = size
+        if self.async and not self.update_thread.is_alive():
+            self.update_thread.start()
+        logging.debug('rendering...')
+        if self.content and self.valid_size == self.box_size:
             try:
-                self.paint(content)
+                rows = []
+                for row_elements in self.content:
+                    row_content = ''.join([x[2] for x in row_elements])
+                    rows.append(row_content)
+                return urwid.TextCanvas(rows, maxcol=size[0])
             except Exception:
-                logging.exception('cannot render. content is %s', str(content))
-                self.status_setter('error','cannot paint')
-                self.paint([])
-            self.window.refresh()
-    def paint(self, content):
-        self.window.clear()
-        for row, row_content in enumerate(content):
-            self.window.move(row,0)
-            for (attr, cs, text) in row_content:
-                self.window.addstr(text)
+                logging.exception('cannot render. content is %s', str(self.content))
+                self.set_status('error','cannot paint canvas')
+                return urwid.TextCanvas(['e'*size[0]]*size[1], maxcol=size[0])
+        else:
+            return urwid.TextCanvas(['b'*size[0]]*size[1], maxcol=size[0])
 
-
-    def paint_watches(self, watches):
-        self.window.clear()
-        self.window.move(0,0)
-        last_x = 0
-        last_y = 0
-        self.window.move(0,0)
-        for watch in watches:
-            try:
-                if 'x' in watch:
-                    last_x = watch['x']
-                    last_y = watch['y']
-                    self.window.move(watch['y'], watch['x'])
-                elif 'new_line' in watch:
-                    last_y += 1
-                    self.window.move(last_y, last_x)
-                elif 'text' in watch:
-                    self.window.addstr(" "+watch['text']+" ", curses.color_pair(watch.get('color',1)))
-                else:
-                    raise Exception()
-            except Exception, e:
-                self.msg('problem with watch %s: %s'%(watch.get('name', str(watch)), e))
-                continue
 
 class InputWindow(object):
     def __init__(self, app, window, height):
@@ -240,14 +257,6 @@ class InputWindow(object):
             self.msgs= self.msgs[-10:]
         self.refresh()
 
-def init_pywatch(stdscr, options):
-    "pass to curses.wrapper"
-    app = PyWatch(stdscr, options)
-    try:
-        app.main_loop()
-    except KeyboardInterrupt:
-        sys.exit(0)
-
 def parse_args():
     parser = optparse.OptionParser(usage='usage: %prog [options]')
     parser.add_option('', '--connection-file', type='str', default='')
@@ -264,4 +273,11 @@ if __name__ == "__main__":
                 datefmt='%Y/%m/%d %H:%M:%S',
                 level=logging.DEBUG if options.verbose else logging.INFO)
     logging.info('Started')
-    curses.wrapper(init_pywatch, options=options)
+    screen = urwid.raw_display.Screen()
+    #text = urwid.Filler(urwid.Text('abc'))
+    watch_widget = WatchWidget(connection_file=options.connection_file)
+    main_loop = urwid.MainLoop(watch_widget, palette, screen)
+    def refresh(x,y):
+        main_loop.set_alarm_in(1, refresh)
+    main_loop.set_alarm_in(1, refresh)
+    main_loop.run()
