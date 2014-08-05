@@ -3,7 +3,7 @@
 #import pickle
 import curses
 import os
-import json
+import pickle
 import time
 import logging
 from IPython.kernel import KernelManager
@@ -58,7 +58,11 @@ class PyWatch():
         self.input_window.msg(message)
 
     def set_status(self, key, value):
+        if key in self.status and value==self.status[key]:
+            return
         self.status[key] = value
+        if key!='last_answer':
+            logging.debug('status of %s set to %s', key, value)
         self.input_window.status(self.status['connection_file'], self.status.get('error',''), str(self.status['last_answer']))
 
 
@@ -97,23 +101,31 @@ class WatchPanel(object):
         self.km.load_connection_file()
         self.cl = self.km.client()
         self.cl.start_channels()
+        self.exe('import pickle')
+        self.exe('import urwid')
+        self.exe('___top_widget = ___top_widget if "___top_widget" in globals() else urwid.Filler(urwid.Text("Hello, World!", align="center"), valign="middle")')
+
+        self.exe('import IPWatch.watch_lib as wlib')
+
+    def exe(self, s):
+        self.lc.execute(s, silent=True, store_history=False)
 
     def main_loop(self):
         pending_request = None
-        watches = {}
         last_output = datetime.now()
+        content = []
         while True:
             self.status_setter('last_answer', str(datetime.now()-last_output))
             c = self.window.getch()
             if c==-1:
-                time.sleep(1)
+                time.sleep(2)
             elif c== ord('r'):
                 self.msg('reconnecting...')
                 self.setup_kernel_manager()
             elif c == ord('d'):
                 import pudb; pudb.set_trace()
             if pending_request is None:
-                pending_request = self.cl.execute('print json.dumps(_watches)', silent=True, store_history=False)
+                pending_request = self.exe('print pickle.dumps(list(___top_widget.render((%d,%d)).content()))'%(self.window.getmaxyx()[1], self.window.getmaxyx()[0]-1))
             outputs = collect_outputs(self.cl, timeout=0.1)
             if outputs:
                 last_output = datetime.now()
@@ -121,24 +133,38 @@ class WatchPanel(object):
             for msg_id, output in outputs.items():
                 if msg_id==pending_request:
                     try:
-                        watches_raw = output['stdout']
+                        content_raw = output['stdout']
                         try:
-                            watches = json.loads(watches_raw)
-                            if not isinstance(watches, list):
-                                watches = {}
-                                self.status_setter('error','watches must be a list')
+                            content = pickle.loads(content_raw)
+                            if not isinstance(content, list):
+                                content = []
+                                self.status_setter('error','instructions must be a list')
                             else:
                                 fine = True
-                        except ValueError:
-                            watches = {}
-                            self.status_setter('error','no json')
+                        except Exception:
+                            content = []
+                            self.status_setter('error','no pickle')
                     except IndexError:
-                        watches = {'does not exists':''}
+                        raise
+
                 pending_request = None
             if fine:
                 self.status_setter('error','')
-            self.paint_watches(watches)
+            try:
+                self.paint(content)
+            except Exception:
+                logging.exception('cannot render. content is %s', str(content))
+                self.status_setter('error','cannot paint')
+                self.paint([])
             self.window.refresh()
+    def paint(self, content):
+        self.window.clear()
+        for row, row_content in enumerate(content):
+            self.window.move(row,0)
+            for (attr, cs, text) in row_content:
+                self.window.addstr(text)
+
+
     def paint_watches(self, watches):
         self.window.clear()
         self.window.move(0,0)
@@ -191,7 +217,6 @@ class InputWindow(object):
         for i, elem in enumerate(self.status_line_elements[1:-1]):
             if not elem:
                 continue
-            logging.debug('i %s elem %s y %s interval %s'%(i, elem, y, interval))
             self.window.move(y, ((i+1)*interval - len(elem)/2) - 1 )
             self.window.addstr(' ' + elem + ' ')
         last_elem = self.status_line_elements[-1]
