@@ -3,7 +3,6 @@
 #import pickle
 from threading import Thread
 import urwid
-import curses
 import os
 import pickle
 import time
@@ -52,39 +51,14 @@ def collect_outputs(client, timeout=0.1):
             outputs[msg_type].append(content)
     return all_outputs
 ######
-class PyWatch():
-    def __init__(self, stdscr, options):
-        for i in range(7):
-            curses.init_pair(i+1, 7, i+1)
-        self.stdscr = stdscr
-        stdscr.keypad(1)
-        self.status = {'connection_file':'NULL', 'last_answer':-999}
-        input_windows_height = options.input_lines + 1
-        self.input_window = InputWindow(self, curses.newwin(input_windows_height, stdscr.getmaxyx()[1], stdscr.getmaxyx()[0]-input_windows_height, 0), input_windows_height)
-        #self.watch = WatchPanel(self.msg, self.set_status, curses.newwin(stdscr.getmaxyx()[0]-input_windows_height, stdscr.getmaxyx()[1], 0,0), options.connection_file)
-
-    def main_loop(self):
-        self.watch.main_loop()
-
-    def msg(self, message):
-        logging.info(message)
-        self.input_window.msg(message)
-
-    def set_status(self, key, value):
-        if key in self.status and value==self.status[key]:
-            return
-        self.status[key] = value
-        if key!='last_answer':
-            logging.debug('status of %s set to %s', key, value)
-        self.input_window.status(self.status['connection_file'], self.status.get('error',''), str(self.status['last_answer']))
 
 class WatchWidget(urwid.Widget):
 
     _sizing = frozenset(['box'])
+    signals = ['status']
 
-    def __init__(self, status_setter=None, connection_file='', async=True, timeout=0.5):
+    def __init__(self, connection_file='', async=True, timeout=0.5):
         self.status = {}
-        self.status_setter = status_setter
         self.timeout = timeout
         self.km = None
         self.cl = None
@@ -106,10 +80,10 @@ class WatchWidget(urwid.Widget):
         self.status[key] = value
         if key not in unlogged_keys:
             logging.debug('status of %s set to %s', key, value)
-        if self.status_setter:
-            self.status_setter(key, value)
+        self._emit('status', key, value)
 
     def setup_kernel_manager(self, connection_file=None):
+        self.set_status('error', 'reconnecting...')
         if not connection_file:
             if self.kernel_dir:
                 files = [os.path.join(self.kernel_dir,x) for x in os.listdir(self.kernel_dir)]
@@ -168,11 +142,11 @@ class WatchWidget(urwid.Widget):
             pending_request = None
         if fine:
             self.set_status('error','')
-            logging.debug('all is fine')
         if content!=self.content:
             self._invalidate()
-        self.content = content
-        self.valid_size = asked_size
+        if content:
+            self.content = content
+            self.valid_size = asked_size
         return got_outputs
 
     def update_loop(self):
@@ -205,62 +179,38 @@ class WatchWidget(urwid.Widget):
             return urwid.TextCanvas(['b'*size[0]]*size[1], maxcol=size[0])
 
 
-class InputWindow(object):
-    def __init__(self, app, window, height):
-        self.app = app
-        self.window = window
-        self.msgs= []
-        self.height = height
-        self.status_line_elements = ['1', '2', '3']
-        self.refresh()
-    def status(self, *args):
-        self.status_line_elements = args
-        self.refresh()
+class IPythonWatch(urwid.WidgetWrap):
 
-    def create_border(self):
-        self.window.refresh()
-        self.window.move(0,0)
-        self.window.addstr("-"*self.window.getmaxyx()[1])
+    def selectable(self):
+        return True
 
-    def add_status_line(self, y):
-        if not self.status_line_elements:
-            return
-        n_elements = len(self.status_line_elements)
-        maxx = self.window.getmaxyx()[1]-1
-        interval = maxx / ( n_elements - 1 )
-        first_elem = self.status_line_elements[0]
-        self.window.move(1,0)
-        self.window.addstr(first_elem[:maxx] + ' ')
-        for i, elem in enumerate(self.status_line_elements[1:-1]):
-            if not elem:
-                continue
-            self.window.move(y, ((i+1)*interval - len(elem)/2) - 1 )
-            self.window.addstr(' ' + elem + ' ')
-        last_elem = self.status_line_elements[-1]
-        self.window.move(y, maxx - len(last_elem))
-        self.window.addstr(' ' + last_elem)
-    def refresh(self):
-        self.window.clear()
-        self.create_border()
-        self.add_status_line(1)
-        msgs_to_display = self.msgs[-self.height+2:]
-        for i, s in enumerate(msgs_to_display):
-            self.window.move(i+2,0)
-            try:
-                self.window.addstr(s[:self.window.getmaxyx()[1]-1])
-            except:
-                raise Exception('cannot display:', s)
-        self.window.refresh()
-    def msg(self, new_status):
-        self.msgs.append(str(new_status).replace('\n',' '))
-        if len(self.msgs)>100:
-            self.msgs= self.msgs[-10:]
-        self.refresh()
+    def __init__(self, connection_file='', async=True, timeout=0.5):
+        self.body = WatchWidget(connection_file=connection_file, async=async, timeout=timeout)
+        divider = urwid.Filler(urwid.Divider(u'\u2500'))
+        conn_file = os.path.basename(self.body.status['connection_file']) if self.body.status.get('connection_file') else 'no connection file'
+        self.file_status = urwid.Text(conn_file, align='left')
+        status_divider = urwid.Text('|', align='center')
+        self.error_status = urwid.Text('error', align='center')
+        self.last_update = urwid.Text('-', align='right')
+        footer_columns = urwid.Filler(urwid.Columns([self.file_status, (1, status_divider), (20, self.error_status), (1, status_divider), self.last_update]))
+        urwid.connect_signal(self.body, 'status', self.set_status)
+        pile = urwid.Pile([self.body, (1, divider), (1, footer_columns)])
+        urwid.WidgetWrap.__init__(self,urwid.LineBox(pile))
+
+    def keypress(self, size, key):
+        self.body.setup_kernel_manager()
+
+    def set_status(self, a, key, value):
+        if key=='error':
+            self.error_status.set_text(value)
+        if key=='connection_file':
+            self.file_status.set_text(os.path.basename(value))
+        if key=='last_answer':
+            self.last_update.set_text(str(value))
 
 def parse_args():
     parser = optparse.OptionParser(usage='usage: %prog [options]')
     parser.add_option('', '--connection-file', type='str', default='')
-    parser.add_option('', '--input-lines', type='int', default='3')
     parser.add_option('', '--log-file', type='str', default='')
     parser.add_option('-v', '--verbose', action='store_true')
     return parser.parse_args()
@@ -274,8 +224,7 @@ if __name__ == "__main__":
                 level=logging.DEBUG if options.verbose else logging.INFO)
     logging.info('Started')
     screen = urwid.raw_display.Screen()
-    #text = urwid.Filler(urwid.Text('abc'))
-    watch_widget = WatchWidget(connection_file=options.connection_file)
+    watch_widget = IPythonWatch(connection_file=options.connection_file, timeout=1)
     main_loop = urwid.MainLoop(watch_widget, palette, screen)
     def refresh(x,y):
         main_loop.set_alarm_in(1, refresh)
