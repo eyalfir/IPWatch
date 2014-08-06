@@ -1,4 +1,4 @@
-from urwid import Text, WidgetWrap, Filler, Columns, Pile
+from urwid import Text, WidgetWrap, Filler, Columns, Pile, LineBox
 
 class WatchText(WidgetWrap):
     def __init__(self, factory, align='left', wrap='space', layout=None):
@@ -13,37 +13,64 @@ class WatchText(WidgetWrap):
 class Watch(WidgetWrap):
     def __init__(self, name, factory):
         self.watch_name = name
-        default = Columns([Filler(Text('%s'%self.watch_name, wrap='clip', align='right')), (3, Filler(Text(' = '))), Filler(WatchText(factory, wrap='clip'))])
-        WidgetWrap.__init__(self, default)
+        key_widget = Text('%s'%self.watch_name, wrap='clip', align='left')
+        default = Columns([('pack', key_widget), (3, Text(' = ')), WatchText(factory, wrap='clip')])
+        WidgetWrap.__init__(self, Filler(default))
 
 class WatchList(WidgetWrap):
-    def __init__(self, globals_factory, watches=['wlib']):
-        self.globals_factory = globals_factory
+    def __init__(self, watches=None, title=None):
+        """watches is a list of tuples - (name, factory)"""
+        watches = watches or []
         self.pile = Pile([])
-        for key in watches:
-            self.add_key(key)
-        WidgetWrap.__init__(self, self.pile)
+        for key, factory in watches:
+            self.add_watch(key, factory)
+        widget = LineBox(self.pile, title=title) if title else self.pile
+        WidgetWrap.__init__(self, widget)
 
-    def get_watched_keys(self):
+    def add_watch(self, key, factory):
+        self.pile.contents.append((Watch(key, factory), ('given', 1)))
+
+    def remove_all_watches(self):
+        for watch in list(self.pile.contents):
+            self.pile.contents.remove(watch)
+
+    def get_watches(self):
         return [x[0].watch_name for x in self.pile.contents]
 
-    def remove_key(self, key):
-        if key in self.get_watched_keys():
-            self.pile.contents.remove([x for x in self.pile.contents if x[0].watch_name==key][0])
+    def remove_watch(self, key):
+        if key in self.get_watches():
+            self.pile.contents.remove([x for x in self.pile.contents if x[0].watch_name == key][0])
         else:
             raise KeyError('%s does not exist', key)
 
+class WatchDict(WidgetWrap):
+    def __init__(self, dict_factory, keys=None, title=None):
+        keys = keys or []
+        self.dict_factory = dict_factory
+        self.default = WatchList(title=title)
+        for key in keys:
+            self.add_key(key)
+        WidgetWrap.__init__(self, self.default)
+
+    def remove_key(self, key):
+        self.default.remove_watch(key)
+
     def add_key(self, key):
-        self.pile.contents.append((Watch(key, lambda:self.globals_factory().get(key, '%s does not exist'%key)), ('given',1)))
+        factory = lambda: self.dict_factory().get(key, '%s does not exist'%key)
+        self.default.add_watch(key, factory)
 
     def remove_all_keys(self):
-        for key in self.get_watched_keys():
-            self.remove_key(key)
+        self.default.remove_all_watches()
 
     def set_keys(self, keys):
         self.remove_all_keys()
         for key in keys:
             self.add_key(key)
+
+class WatchObject(WatchDict):
+
+    def __init__(self, object_factory, title=True):
+        super(WatchObject, self).__init__(lambda: object_factory().__dict__, [x for x in object_factory().__dict__.keys() if x[0] != '_'], title=title)
 
 class WatchTextList(WidgetWrap):
     def __init__(self, factory, align='left'):
@@ -53,7 +80,7 @@ class WatchTextList(WidgetWrap):
 
     def render(self, size, focus=False):
         lines = [str(x)[:size[0]] for x in self.factory()][-size[1]:]
-        if len(lines)<size[1]:
+        if len(lines) < size[1]:
             lines = ['']*(size[1]-len(lines)) + lines
         self.text.set_text('\n'.join(lines))
         return super(WatchTextList, self).render((size[0],), focus=focus)
