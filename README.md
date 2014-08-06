@@ -31,3 +31,5 @@ Then, using a different terminal start IPWatch:
 In your first terminal, you now have new global [urwid](http://urwid.org) widget called ``___top_widget``. Simply set ``___top_widget`` to any [box urwid](http://urwid.org/manual/widgets.html#box-flow-and-fixed-widgets) widget to have it displayed in the watch terminal.
 
 That's it, you are done
+
+* tested with ipython 2.1.0, urwid 1.2.1
