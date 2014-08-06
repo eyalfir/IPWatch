@@ -14,16 +14,16 @@ from datetime import datetime
 import optparse
 
 palette = [
-    ('body','black','light gray', 'standout'),
-    ('reverse','light gray','black'),
-    ('header','white','dark red', 'bold'),
-    ('important','dark blue','light gray',('standout','underline')),
-    ('editfc','white', 'dark blue', 'bold'),
-    ('editbx','light gray', 'dark blue'),
-    ('editcp','black','light gray', 'standout'),
-    ('bright','dark gray','light gray', ('bold','standout')),
-    ('buttn','black','dark cyan'),
-    ('buttnf','white','dark blue','bold'),
+    ('body', 'black', 'light gray', 'standout'),
+    ('reverse', 'light gray', 'black'),
+    ('header', 'white', 'dark red', 'bold'),
+    ('important', 'dark blue', 'light gray', ('standout', 'underline')),
+    ('editfc', 'white', 'dark blue', 'bold'),
+    ('editbx', 'light gray', 'dark blue'),
+    ('editcp', 'black', 'light gray', 'standout'),
+    ('bright', 'dark gray', 'light gray', ('bold', 'standout')),
+    ('buttn', 'black', 'dark cyan'),
+    ('buttnf', 'white', 'dark blue', 'bold'),
     ]
 # taken from http://nbviewer.ipython.org/gist/minrk/5672711
 def collect_outputs(client, timeout=0.1):
@@ -65,7 +65,9 @@ class WatchWidget(urwid.Widget):
         self.kernel_dir = None
         self.connection_file = connection_file
         self.setup_kernel_manager(connection_file)
-        # box_size and valid_size both hold size tuple. box_size is the last size the parent asked in the render, and valid_size is the size which 'self.content' was rendered with. Only if they match the widget will paint itself.
+        # box_size and valid_size both hold size tuple.
+        # box_size is the last size the parent asked in the render, and valid_size is the size which 'self.content' was rendered with.
+        # Only if they match the widget will paint itself.
         self.box_size = None
         self.valid_size = None
         self.async = async
@@ -74,8 +76,10 @@ class WatchWidget(urwid.Widget):
             self.update_thread.setDaemon(True)
         self.content = []
 
-    def set_status(self, key, value, unlogged_keys={'last_answer'}):
-        if key in self.status and value==self.status[key]:
+    def set_status(self, key, value, unlogged_keys=None):
+        if unlogged_keys is None:
+            unlogged_keys = {'last_answer'}
+        if key in self.status and value == self.status[key]:
             return
         self.status[key] = value
         if key not in unlogged_keys:
@@ -86,19 +90,19 @@ class WatchWidget(urwid.Widget):
         self.set_status('error', 'reconnecting...')
         if not connection_file:
             if self.kernel_dir:
-                files = [os.path.join(self.kernel_dir,x) for x in os.listdir(self.kernel_dir)]
+                files = [os.path.join(self.kernel_dir, x) for x in os.listdir(self.kernel_dir)]
                 stats = {}
                 for f in files:
                     stats[f] = os.stat(f)
                 max_mtime = max([x.st_mtime for x in stats.values()])
-                options = [x for x,y in stats.items() if y.st_mtime==max_mtime]
-                if len(options)==1:
-                    connection_file = options[0]
+                candidates = [x for x, y in stats.items() if y.st_mtime == max_mtime]
+                if len(candidates) == 1:
+                    connection_file = candidates[0]
             else:
                 connection_file = '*'
         connection_file = find_connection_file(connection_file)
         self.set_status('connection_file', connection_file)
-        logging.info('connection established to connection_file %s'%connection_file)
+        logging.info('connection established to connection_file %s', connection_file)
         if connection_file:
             self.kernel_dir = os.path.dirname(connection_file)
         self.km = KernelManager(connection_file=connection_file)
@@ -108,7 +112,6 @@ class WatchWidget(urwid.Widget):
         self.exe('import pickle')
         self.exe('import urwid')
         self.exe('___top_widget = ___top_widget if "___top_widget" in globals() else urwid.Filler(urwid.Text("Hello, World!", align="center"), valign="middle")')
-
         self.exe('import IPWatch.watch_lib as wlib')
 
     def exe(self, s):
@@ -123,26 +126,26 @@ class WatchWidget(urwid.Widget):
         got_outputs = bool(outputs)
         fine = False
         for msg_id, output in outputs.items():
-            if msg_id==pending_request:
+            if msg_id == pending_request:
                 try:
                     content_raw = output['stdout']
                     try:
                         content = pickle.loads(content_raw)
                         if not isinstance(content, list):
                             content = []
-                            self.set_status('error','instructions must be a list')
+                            self.set_status('error', 'instructions must be a list')
                         else:
                             fine = True
                     except Exception:
                         content = []
-                        self.set_status('error','no pickle')
+                        self.set_status('error', 'rendering error')
                 except IndexError:
                     raise
 
             pending_request = None
         if fine:
-            self.set_status('error','')
-        if content!=self.content:
+            self.set_status('error', '')
+        if content != self.content:
             self._invalidate()
         if content:
             self.content = content
@@ -173,7 +176,7 @@ class WatchWidget(urwid.Widget):
                 return urwid.TextCanvas(rows, maxcol=size[0])
             except Exception:
                 logging.exception('cannot render. content is %s', str(self.content))
-                self.set_status('error','cannot paint canvas')
+                self.set_status('error', 'cannot paint canvas')
                 return urwid.TextCanvas(['e'*size[0]]*size[1], maxcol=size[0])
         else:
             return urwid.TextCanvas(['b'*size[0]]*size[1], maxcol=size[0])
@@ -195,17 +198,17 @@ class IPythonWatch(urwid.WidgetWrap):
         footer_columns = urwid.Filler(urwid.Columns([self.file_status, (1, status_divider), (20, self.error_status), (1, status_divider), self.last_update]))
         urwid.connect_signal(self.body, 'status', self.set_status)
         pile = urwid.Pile([self.body, (1, divider), (1, footer_columns)])
-        urwid.WidgetWrap.__init__(self,urwid.LineBox(pile))
+        urwid.WidgetWrap.__init__(self, urwid.LineBox(pile))
 
     def keypress(self, size, key):
         self.body.setup_kernel_manager()
 
     def set_status(self, a, key, value):
-        if key=='error':
+        if key == 'error':
             self.error_status.set_text(value)
-        if key=='connection_file':
+        if key == 'connection_file':
             self.file_status.set_text(os.path.basename(value))
-        if key=='last_answer':
+        if key == 'last_answer':
             self.last_update.set_text(str(value))
 
 def parse_args():
@@ -218,7 +221,7 @@ def parse_args():
 if __name__ == "__main__":
     options, args = parse_args()
     if options.log_file:
-        logging.basicConfig(stream=open(options.log_file,'a'),
+        logging.basicConfig(stream=open(options.log_file, 'a'),
                 format='%(asctime)s | %(levelname)-5s | IPWatch | %(message)s',
                 datefmt='%Y/%m/%d %H:%M:%S',
                 level=logging.DEBUG if options.verbose else logging.INFO)
@@ -226,7 +229,7 @@ if __name__ == "__main__":
     screen = urwid.raw_display.Screen()
     watch_widget = IPythonWatch(connection_file=options.connection_file, timeout=1)
     main_loop = urwid.MainLoop(watch_widget, palette, screen)
-    def refresh(x,y):
+    def refresh(x, y):
         main_loop.set_alarm_in(1, refresh)
     main_loop.set_alarm_in(1, refresh)
     main_loop.run()
