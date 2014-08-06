@@ -57,13 +57,15 @@ class WatchWidget(urwid.Widget):
     _sizing = frozenset(['box'])
     signals = ['status']
 
-    def __init__(self, connection_file='', async=True, timeout=0.5):
+    def __init__(self, connection_file='', async=True, timeout=0.5, automatic_reconnect=10):
+        self.automatic_reconnect = automatic_reconnect
         self.status = {}
         self.timeout = timeout
         self.km = None
         self.cl = None
         self.kernel_dir = None
         self.connection_file = connection_file
+        self.last_connection = datetime.now()
         self.setup_kernel_manager(connection_file)
         # box_size and valid_size both hold size tuple.
         # box_size is the last size the parent asked in the render, and valid_size is the size which 'self.content' was rendered with.
@@ -87,6 +89,7 @@ class WatchWidget(urwid.Widget):
         self._emit('status', key, value)
 
     def setup_kernel_manager(self, connection_file=None):
+        self.last_connection = datetime.now()
         self.set_status('error', 'reconnecting...')
         if not connection_file:
             if self.kernel_dir:
@@ -160,6 +163,8 @@ class WatchWidget(urwid.Widget):
             if got_outputs:
                 last_output = datetime.now()
             self.set_status('last_answer', str(datetime.now()-last_output))
+            if self.automatic_reconnect and (datetime.now() - last_output).total_seconds() > self.automatic_reconnect and (datetime.now() - self.last_connection).total_seconds() > 11:
+                self.setup_kernel_manager()
             time.sleep(1)
 
     def render(self, size, focus=False):
@@ -201,7 +206,8 @@ class IPythonWatch(urwid.WidgetWrap):
         urwid.WidgetWrap.__init__(self, urwid.LineBox(pile))
 
     def keypress(self, size, key):
-        self.body.setup_kernel_manager()
+        if key == 'r':
+            self.body.setup_kernel_manager()
 
     def set_status(self, a, key, value):
         if key == 'error':
