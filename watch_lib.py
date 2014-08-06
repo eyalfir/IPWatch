@@ -1,4 +1,4 @@
-from urwid import Text, WidgetWrap, Filler, Columns, Pile, LineBox
+from urwid import Text, WidgetWrap, Filler, Columns, Pile, LineBox, Overlay, SolidFill
 
 class WatchText(WidgetWrap):
     def __init__(self, factory, align='left', wrap='space', layout=None):
@@ -24,7 +24,11 @@ class WatchList(WidgetWrap):
         self.pile = Pile([])
         for key, factory in watches:
             self.add_watch(key, factory)
-        widget = LineBox(self.pile, title=title) if title else self.pile
+        if title:
+            overlay = Overlay(self.pile, SolidFill(' '), align='center', width=('relative', 100), valign='middle', height=('relative', 100), left=1, right=1)
+            widget = LineBox(overlay, title=title)
+        else:
+            widget = self.pile
         WidgetWrap.__init__(self, widget)
 
     def add_watch(self, key, factory):
@@ -70,7 +74,22 @@ class WatchDict(WidgetWrap):
 class WatchObject(WatchDict):
 
     def __init__(self, object_factory, title=True):
-        super(WatchObject, self).__init__(lambda: object_factory().__dict__, [x for x in object_factory().__dict__.keys() if x[0] != '_'], title=title)
+        self.object_factory = object_factory
+        self.keys = []
+        super(WatchObject, self).__init__(lambda: object_factory().__dict__, self.keys, title=title)
+
+    def _get_object_keys(self):
+        return [x for x in self.object_factory().__dict__.keys() if x[0] != '_']
+
+    def render(self, size, focus=False):
+        new_keys = self._get_object_keys()
+        if new_keys != self.keys:
+            self.remove_all_keys()
+            self.keys = new_keys
+            for key in new_keys:
+                self.add_key(key)
+        return super(WatchObject, self).render(size, focus)
+
 
 class WatchTextList(WidgetWrap):
     def __init__(self, factory, align='left'):
