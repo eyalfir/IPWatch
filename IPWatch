@@ -121,7 +121,7 @@ class WatchWidget(urwid.Widget):
     def refresh(self, timeout=0.5):
         content = []
         asked_size = self.box_size
-        pending_request = self.exe('print pickle.dumps(list(___top_widget.render((%d,%d)).content()))'%(asked_size))
+        pending_request = self.exe('try:\n    print pickle.dumps(list(___top_widget.render((%d,%d)).content()))\nexcept Exception:\n    _ipwatch_error=sys.exc_info()\n    raise'%(asked_size))
         outputs = collect_outputs(self.cl, timeout=timeout)
         got_outputs = bool(outputs)
         fine = False
